@@ -56,8 +56,6 @@ func (app *application) mount() *chi.Mux {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", app.health)
 		r.Post("/upload", app.uploadVideo)
-		r.Get("/ws", app.wsHandler)
-		// r.Get("/videos/{id}", app.serveVideo)
 		r.Get("/status", app.ssestatusHandler) // Changed from /status/{id} to /status?id=VIDEO_ID
 	})
 	return r
