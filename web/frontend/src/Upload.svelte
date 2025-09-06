@@ -7,7 +7,7 @@
     let processed = false;
     let videoId: string | null = null;
     let errorMsg = "";
-    let ws: WebSocket | null = null;
+    let eventSource: EventSource | null = null;
 
     interface UploadResponse {
         videoId: string;
@@ -51,21 +51,17 @@
             const data: UploadResponse = await res.json();
             videoId = data.videoId;
 
-            connectWebSocket(videoId);
+            connectSSE(videoId);
         } catch (err: unknown) {
             errorMsg = err instanceof Error ? err.message : String(err);
             uploading = false;
         }
     };
 
-    const connectWebSocket = (id: string) => {
-        ws = new WebSocket(`ws://localhost:3030/api/v1/ws?id=${id}`);
+    const connectSSE = (id: string) => {
+        eventSource = new EventSource(`http://localhost:3030/api/v1/status?id=${id}`);
 
-        ws.onopen = () => {
-            console.log("WebSocket connected");
-        };
-
-        ws.onmessage = (event: MessageEvent) => {
+        eventSource.onmessage = (event: MessageEvent) => {
             try {
                 const msg: StatusMessage = JSON.parse(event.data);
                 console.log("Message from server:", msg);
@@ -73,25 +69,22 @@
                 if (msg.processed) {
                     processed = true;
                     uploading = false;
-                    ws?.close();
+                    eventSource?.close();
                 }
             } catch (e) {
-                console.error("Invalid WebSocket message:", e);
+                console.error("Invalid SSE message:", e);
             }
         };
 
-        ws.onerror = (err: Event) => {
-            console.error("WebSocket error:", err);
-            errorMsg = "WebSocket connection error.";
-        };
-
-        ws.onclose = () => {
-            console.log("WebSocket closed");
+        eventSource.onerror = (err: Event) => {
+            console.error("SSE error:", err);
+            errorMsg = "Connection error. Please refresh the page and try again.";
+            eventSource?.close();
         };
     };
 
     onDestroy(() => {
-        ws?.close();
+        eventSource?.close();
     });
 </script>
 
