@@ -49,7 +49,19 @@ web/frontend/.vscode
 
 # Custom rules (everything added below won't be overriden by 'Generate .gitignore File' if you use 'Update' option)
 
-bin
-uploads
-outputs
-reference
+# Binaries
+bin/
+
+# Temp working dirs (worker creates these during transcode)
+uploads/
+outputs/
+
+# Reference
+reference/
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# Air (hot-reload)
+tmp/

@@ -3,23 +3,20 @@ package queue
 import (
 	"encoding/json"
 	"log/slog"
-	"path/filepath"
 
 	"github.com/hibiken/asynq"
 )
 
 type TranscodePayload struct {
-	VideoID   string `json:"video_id"`
-	Filename  string `json:"filename"`
-	InputPath string `json:"input_path"`
+	VideoID string `json:"video_id"`
+	S3Key   string `json:"s3_key"`
 }
 
-func EnqueueTranscode(client *asynq.Client, videoID, filePath string) error {
-	slog.Info("file metadata", "videoID", videoID, "filePath", filePath)
+func EnqueueTranscode(client *asynq.Client, videoID, s3Key string) error {
+	slog.Info("enqueue transcode", "videoID", videoID, "s3Key", s3Key)
 	payload, err := json.Marshal(TranscodePayload{
-		VideoID:   videoID,
-		Filename:  filepath.Base(filePath),
-		InputPath: filePath,
+		VideoID: videoID,
+		S3Key:   s3Key,
 	})
 	if err != nil {
 		return err
@@ -27,6 +24,6 @@ func EnqueueTranscode(client *asynq.Client, videoID, filePath string) error {
 
 	info, err := client.Enqueue(asynq.NewTask(TypeVideoTranscode, payload))
 	jsonInfo, _ := json.Marshal(info)
-	slog.Info("task information", "info", jsonInfo)
+	slog.Info("task information", "info", string(jsonInfo))
 	return err
 }

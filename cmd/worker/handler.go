@@ -4,50 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
-	"time"
+	"path/filepath"
 
 	"github.com/hibiken/asynq"
+	"github.com/theluminousartemis/video-transcoder/internal/env"
 	"github.com/theluminousartemis/video-transcoder/internal/queue"
 )
-
-var (
-	uploadsDir = "./uploads"
-	outputsDir = "./outputs"
-	scriptsDir = "./scripts"
-)
-
-//single container approach
-
-// func (app *application) HandleTranscodeTask(ctx context.Context, t *asynq.Task) error {
-// 	var payload queue.TranscodePayload
-// 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-// 		return err
-// 	}
-
-// 	// Run ffmpeg container
-// 	containerInput := fmt.Sprintf("/uploads/%s", payload.Filename)
-// 	cmd := exec.Command("docker", "run", "--rm",
-// 		"-v", fmt.Sprintf("%s:/uploads:ro", uploadsDir),
-// 		"-v", fmt.Sprintf("%s:/outputs", outputsDir),
-// 		"-v", fmt.Sprintf("%s:/scripts:ro", scriptsDir),
-// 		"--entrypoint", "bash",
-// 		"jrottenberg/ffmpeg:latest",
-// 		"/scripts/transcode.sh", containerInput,
-// 	)
-
-// 	cmd.Stdout = os.Stdout
-// 	cmd.Stderr = os.Stderr
-// 	slog.Info("docker command", "args", cmd.Args)
-
-// 	if err := cmd.Run(); err != nil {
-// 		return fmt.Errorf("docker run failed: %w", err)
-// 	}
-// 	return nil
-// }
 
 type StatusMessage struct {
 	UUID      string `json:"id"`
@@ -55,54 +19,79 @@ type StatusMessage struct {
 	Status    string `json:"status"`
 }
 
-// cli orchestrator
+// HandleTranscodeTask downloads the video from S3, transcodes it, uploads HLS output back to S3.
 func (app *application) HandleTranscodeTask(ctx context.Context, t *asynq.Task) error {
 	var payload queue.TranscodePayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
 		return err
 	}
 
-	serviceName := fmt.Sprintf("transcode-%s", payload.VideoID)
+	uploadsDir := env.GetString("UPLOADS_DIR", "./uploads")
+	outputsDir := env.GetString("OUTPUTS_DIR", "./outputs")
+	scriptsDir := env.GetString("SCRIPTS_DIR", "./scripts")
+
+	// Resolve to absolute paths (Docker bind-mounts require absolute paths)
+	uploadsDir, _ = filepath.Abs(uploadsDir)
+	outputsDir, _ = filepath.Abs(outputsDir)
+	scriptsDir, _ = filepath.Abs(scriptsDir)
+
+	// Ensure directories exist
+	os.MkdirAll(uploadsDir, 0o755)
+	os.MkdirAll(outputsDir, 0o755)
+
+	// Download the raw video from MinIO to local filesystem (required for Docker bind-mount)
+	filename := filepath.Base(payload.S3Key)
+	localInput := filepath.Join(uploadsDir, filename)
+
+	app.logger.Info("downloading raw video from S3", "s3Key", payload.S3Key, "dest", localInput)
+	if err := app.s3.Download(ctx, UploadsBucket, payload.S3Key, localInput); err != nil {
+		return fmt.Errorf("failed to download video from S3: %w", err)
+	}
+	defer func() {
+		if err := os.Remove(localInput); err != nil {
+			app.logger.Error("failed to clean up local input", "file", localInput, "err", err)
+		}
+	}()
+
+	// Run FFmpeg in a container — blocks until transcoding completes, auto-removes on exit
+	uid := os.Getuid()
+	gid := os.Getgid()
 
 	cmd := exec.Command(
-		"docker", "service", "create",
-		"--name", serviceName,
-		"--restart-condition", "none",
-		"--mount", fmt.Sprintf("type=bind,src=%s,dst=/uploads,ro", uploadsDir),
-		"--mount", fmt.Sprintf("type=bind,src=%s,dst=/outputs", outputsDir),
-		"--mount", fmt.Sprintf("type=bind,src=%s,dst=/scripts,ro", scriptsDir),
+		"docker", "run", "--rm",
+		"--user", fmt.Sprintf("%d:%d", uid, gid),
+		"-v", fmt.Sprintf("%s:/uploads:ro", uploadsDir),
+		"-v", fmt.Sprintf("%s:/outputs", outputsDir),
+		"-v", fmt.Sprintf("%s:/scripts:ro", scriptsDir),
 		"--entrypoint", "bash",
 		"jrottenberg/ffmpeg:latest",
-		"/scripts/transcodeh265.sh", fmt.Sprintf("/uploads/%s", payload.Filename),
+		"/scripts/transcodeh265.sh", fmt.Sprintf("/uploads/%s", filename),
 	)
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	slog.Info("docker command", "args", cmd.Args)
+	app.logger.Info("docker command", "args", cmd.Args)
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create service: %w", err)
+		return fmt.Errorf("ffmpeg transcode failed: %w", err)
 	}
 
-	for {
-		out, _ := exec.Command(
-			"docker", "service", "ps", serviceName,
-			"--no-trunc", "--format", "{{.CurrentState}}",
-		).Output()
+	// Upload transcoded HLS output to the streaming bucket
+	outputDir := filepath.Join(outputsDir, payload.VideoID)
+	s3Prefix := payload.VideoID
 
-		state := strings.TrimSpace(string(out))
-		slog.Info("service state", "service", serviceName, "state", state)
+	if err := app.s3.UploadDir(ctx, StreamingBucket, s3Prefix, outputDir); err != nil {
+		app.logger.Error("failed to upload HLS output to S3", "err", err)
+		return fmt.Errorf("s3 upload failed: %w", err)
+	}
+	app.logger.Info("uploaded HLS output to streaming bucket", "prefix", s3Prefix)
 
-		if strings.HasPrefix(state, "Complete") || strings.HasPrefix(state, "Failed") {
-			break
-		}
-		time.Sleep(5 * time.Second)
+	// Clean up local output directory
+	if err := os.RemoveAll(outputDir); err != nil {
+		app.logger.Error("failed to clean up local output", "dir", outputDir, "err", err)
 	}
 
-	exec.Command("docker", "service", "logs", serviceName).Run()
-
-	exec.Command("docker", "service", "rm", serviceName).Run()
-
+	// Publish completion event via Valkey
 	statusMessage := StatusMessage{
 		UUID:      payload.VideoID,
 		Processed: true,
@@ -110,17 +99,13 @@ func (app *application) HandleTranscodeTask(ctx context.Context, t *asynq.Task) 
 	}
 
 	data, _ := json.Marshal(statusMessage)
-	// err := app.rdb.Publish(ctx, fmt.Sprintf("video:%s", payload.VideoID), data)
-	// if err != nil {
-	// 	app.logger.Error("failed to publish redis message", "err", err)
-	// }
 
 	if err := app.rdb.Publish(
 		ctx,
 		fmt.Sprintf("video:%s", payload.VideoID),
 		data,
 	).Err(); err != nil {
-		app.logger.Error("failed to publish redis message", "err", err)
+		app.logger.Error("failed to publish message", "err", err)
 	}
 
 	return nil

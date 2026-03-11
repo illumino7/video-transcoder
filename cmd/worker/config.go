@@ -6,6 +6,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"github.com/theluminousartemis/video-transcoder/internal/queue"
+	"github.com/theluminousartemis/video-transcoder/internal/storage"
 )
 
 type config struct {
@@ -30,6 +31,7 @@ type application struct {
 	config   *config
 	queueMgr queue.QueueManager
 	rdb      *redis.Client
+	s3       *storage.S3Client
 }
 
 func runAsynqWorker(app *application) error {

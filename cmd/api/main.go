@@ -8,6 +8,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/theluminousartemis/video-transcoder/internal/env"
 	"github.com/theluminousartemis/video-transcoder/internal/queue"
+	"github.com/theluminousartemis/video-transcoder/internal/storage"
 )
 
 func main() {
@@ -29,12 +30,12 @@ func main() {
 		},
 	}
 
-	//logger
+	// logger
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
-	//queuemanager
+	// asynq client
 	logger.Info("connecting asynq redis client to redis", "addr", cfg.redisAddr)
 	client := asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.redisAddr})
 	defer client.Close()
@@ -44,27 +45,41 @@ func main() {
 		AsynqServer: nil,
 	}
 
-	//redis
+	// redis pubsub
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.redisCfg.addr,
 		Password: cfg.redisCfg.password,
 		DB:       cfg.redisCfg.db,
 	})
 
+	// minio s3
+	s3Client, err := storage.NewS3Client(storage.S3Config{
+		Endpoint:  env.GetString("MINIO_ENDPOINT", "localhost:9000"),
+		AccessKey: env.GetString("MINIO_ACCESS_KEY", "minioadmin"),
+		SecretKey: env.GetString("MINIO_SECRET_KEY", "minioadmin"),
+		UseSSL:    env.GetBool("MINIO_USE_SSL", false),
+		Buckets:   []string{UploadsBucket, StreamingBucket},
+	}, logger)
+	if err != nil {
+		logger.Error("failed to init minio client", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("connected to minio s3")
+
 	app := application{
 		config:   cfg,
 		logger:   logger,
 		queueMgr: queueMgr,
 		rdb:      rdb,
+		s3:       s3Client,
 	}
-	//mux
+
+	// mux
 	mux := app.mount()
 
-	//starting the server
+	// starting the server
 	logger.Info("starting the server", "addr", app.config.addr)
-	err := app.start(mux)
-	if err != nil {
+	if err := app.start(mux); err != nil {
 		logger.Error("error starting server", "addr", app.config.addr)
 	}
-
 }
