@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { API_BASE, MAX_FILE_SIZE } from '../config/constants';
 
 // ── Types ──────────────────────────────────────────────
+// Interfaces defining the API contracts and component props.
 
 interface UploadResponse {
   videoId: string;
@@ -21,6 +22,7 @@ interface UploadProps {
 }
 
 // ── Helpers ────────────────────────────────────────────
+// Pure functions containing presentation formatting logic.
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -29,6 +31,8 @@ function formatFileSize(bytes: number): string {
 }
 
 // ── Component ──────────────────────────────────────────
+// The Upload component manages the entire drag-and-drop state machine, 
+// the direct-to-S3 file upload sequence, and real-time SSE progress tracking.
 
 export default function Upload({ onComplete }: UploadProps) {
   const [file, setFile] = useState<File | null>(null);
@@ -46,6 +50,7 @@ export default function Upload({ onComplete }: UploadProps) {
   }, []);
 
   // ── File Selection ─────────────────────────────────
+  // Callbacks handling Drag & Drop interaction states and standard input selections.
 
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -86,6 +91,8 @@ export default function Upload({ onComplete }: UploadProps) {
   }, []);
 
   // ── SSE Connection ─────────────────────────────────
+  // Establishes a unidirectional EventSource tunnel to the backend to receive 
+  // real-time pub/sub notifications about the remote transcoding progress.
 
   const connectSSE = useCallback(
     (videoId: string) => {
@@ -115,6 +122,11 @@ export default function Upload({ onComplete }: UploadProps) {
   );
 
   // ── Upload Flow ────────────────────────────────────
+  // Orchestrates the multi-step upload pipeline:
+  // 1. Fetches a time-bound presigned URL from the API.
+  // 2. Uploads the raw video directly to the S3 bucket via PUT, bypassing our backend.
+  // 3. Notifies the API to verify the upload and enqueue the transcoding job.
+  // 4. Initiates a Server-Sent Events (SSE) connection to listen for completion.
 
   const uploadVideo = useCallback(async () => {
     if (!file) {
@@ -165,6 +177,7 @@ export default function Upload({ onComplete }: UploadProps) {
   }, [file, connectSSE]);
 
   // ── Render: Processing ─────────────────────────────
+  // Displays the indeterminate loading state while waiting for job completion.
 
   if (processing) {
     return (
@@ -181,6 +194,7 @@ export default function Upload({ onComplete }: UploadProps) {
   }
 
   // ── Render: Upload ─────────────────────────────────
+  // Displays the primary drag-and-drop zone, file info, and validation errors.
 
   return (
     <div className="bg-white/[0.06] backdrop-blur-2xl border border-white/[0.08] rounded-3xl p-10 transition-all duration-300 hover:border-indigo-500/40 hover:shadow-[0_0_40px_rgba(99,102,241,0.25)]">

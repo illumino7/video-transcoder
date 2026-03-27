@@ -2,6 +2,9 @@ import { useNavigate, useParams } from 'react-router-dom';
 import Header from '../components/Header';
 import VideoPlayer from '../components/VideoPlayer';
 
+// PlayerPage handles the playback route (/video/:videoId). 
+// It safely extracts the video ID from the URL parameters and mounts the 
+// isolated VideoPlayer component, ensuring playback state doesn't leak.
 export default function PlayerPage() {
   const { videoId } = useParams<{ videoId: string }>();
   const navigate = useNavigate();

@@ -1,3 +1,5 @@
+// Header presents the global branding and primary navigation context for the application.
+// It accepts a toggleable subtitle to cleanly adapt between the upload and player views.
 interface HeaderProps {
   showSubtitle?: boolean;
 }

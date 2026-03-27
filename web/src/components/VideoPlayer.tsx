@@ -11,12 +11,16 @@ import 'jb-videojs-hls-quality-selector';
 import { MINIO_URL } from '../config/constants';
 
 // ── Types ──────────────────────────────────────────────
+// Prop shapes defining the interface for the player component.
 
 interface VideoPlayerProps {
   videoId: string;
 }
 
 // ── Component ──────────────────────────────────────────
+// VideoPlayer serves as a React wrapper around the imperative video.js library.
+// It explicitly constructs the HLS streaming engine and defensively tears it down 
+// upon component unmount to prevent orphaned DOM nodes and memory leaks.
 
 export default function VideoPlayer({ videoId }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -53,6 +57,8 @@ export default function VideoPlayer({ videoId }: VideoPlayerProps) {
       type: 'application/x-mpegURL',
     });
 
+    // Cleanup: Destructively dispose the player instance when the React tree 
+    // unmounts to free up video decoding threads and prevent phantom audio.
     return () => {
       if (playerRef.current) {
         playerRef.current.dispose();
