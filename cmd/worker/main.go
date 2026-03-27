@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
-	"github.com/hibiken/asynq"
-	"github.com/redis/go-redis/v9"
 	"github.com/theluminousartemis/video-transcoder/internal/env"
 	"github.com/theluminousartemis/video-transcoder/internal/queue"
 	"github.com/theluminousartemis/video-transcoder/internal/storage"
+	"github.com/valkey-io/valkey-go"
 )
 
 const (
@@ -18,20 +22,8 @@ const (
 
 func main() {
 	config := &config{
-		redisAddr: env.GetString("REDIS_ADDR", "localhost:6379"),
-		redisqueueCfg: asynqConfig{
-			Concurrency: 10,
-			Queues: map[string]int{
-				"critical": 6,
-				"default":  3,
-				"low":      1,
-			},
-		},
-		redisCfg: redisConfig{
-			addr:     env.GetString("REDIS_ADDR", "localhost:6379"),
-			password: env.GetString("REDIS_PASSWORD", ""),
-			db:       env.GetInt("REDIS_DB", 0),
-		},
+		redisAddr:   env.GetString("REDIS_ADDR", "localhost:6379"),
+		concurrency: env.GetInt("WORKER_CONCURRENCY", 2),
 	}
 
 	// logger
@@ -39,22 +31,16 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
-	// redis queue
-	server := asynq.NewServer(
-		asynq.RedisClientOpt{Addr: config.redisAddr},
-		asynq.Config{
-			Concurrency: config.redisqueueCfg.Concurrency,
-			Queues:      config.redisqueueCfg.Queues,
-		},
-	)
-	logger.Info("successfully connected to redis")
-
-	// redis pubsub
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     config.redisCfg.addr,
-		Password: config.redisCfg.password,
-		DB:       config.redisCfg.db,
+	// valkey client
+	logger.Info("connecting valkey client to redis", "addr", config.redisAddr)
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress: []string{config.redisAddr},
 	})
+	if err != nil {
+		logger.Error("failed to init valkey client", "err", err)
+		os.Exit(1)
+	}
+	defer client.Close()
 
 	// minio s3
 	s3Client, err := storage.NewS3Client(storage.S3Config{
@@ -70,21 +56,45 @@ func main() {
 	}
 	logger.Info("connected to minio s3")
 
-	// queue manager
 	queueMgr := queue.QueueManager{
-		AsynqClient: nil,
-		AsynqServer: server,
+		ValkeyClient: client,
 	}
 
 	app := application{
 		logger:   logger,
 		config:   config,
 		queueMgr: queueMgr,
-		rdb:      rdb,
 		s3:       s3Client,
 	}
 
-	if err := runAsynqWorker(&app); err != nil {
-		logger.Error(err.Error())
+	// Create Consumer Group (ignore error if it already exists)
+	ctx := context.Background()
+	_ = client.Do(ctx, client.B().XgroupCreate().Key(queue.StreamTranscode).Group(queue.ConsumerGroup).Id("0").Mkstream().Build())
+
+	// Start Worker Goroutines
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	hostname, _ := os.Hostname()
+
+	for i := 0; i < config.concurrency; i++ {
+		consumerName := fmt.Sprintf("%s-worker-%d", hostname, i)
+		wg.Add(1)
+		go runValkeyWorker(ctx, &app, consumerName, &wg)
 	}
+
+	// Start DLQ Janitor Goroutine
+	wg.Add(1)
+	go runValkeyJanitor(ctx, &app, &wg)
+
+	// Wait for termination signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	logger.Info("shutting down workers...")
+	cancel() // signal goroutines to stop
+	wg.Wait()
+	logger.Info("workers stopped")
 }

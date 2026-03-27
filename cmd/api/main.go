@@ -4,30 +4,16 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/hibiken/asynq"
-	"github.com/redis/go-redis/v9"
 	"github.com/theluminousartemis/video-transcoder/internal/env"
 	"github.com/theluminousartemis/video-transcoder/internal/queue"
 	"github.com/theluminousartemis/video-transcoder/internal/storage"
+	"github.com/valkey-io/valkey-go"
 )
 
 func main() {
 	cfg := config{
 		addr:      env.GetString("ADDR", ":3030"),
-		redisAddr: env.GetString("ASYNQ_REDIS", "localhost:6379"),
-		asynqCfg: asynqConfig{
-			Concurrency: 10,
-			Queues: map[string]int{
-				"critical": 6,
-				"default":  3,
-				"low":      1,
-			},
-		},
-		redisCfg: redisConfig{
-			addr:     env.GetString("REDIS_ADDR", "localhost:6379"),
-			password: env.GetString("REDIS_PASSWORD", ""),
-			db:       env.GetInt("REDIS_DB", 0),
-		},
+		redisAddr: env.GetString("REDIS_ADDR", "localhost:6379"),
 	}
 
 	// logger
@@ -35,22 +21,20 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
-	// asynq client
-	logger.Info("connecting asynq redis client to redis", "addr", cfg.redisAddr)
-	client := asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.redisAddr})
+	// valkey client
+	logger.Info("connecting valkey client to redis", "addr", cfg.redisAddr)
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress: []string{cfg.redisAddr},
+	})
+	if err != nil {
+		logger.Error("failed to init valkey client", "err", err)
+		os.Exit(1)
+	}
 	defer client.Close()
 
 	queueMgr := &queue.QueueManager{
-		AsynqClient: client,
-		AsynqServer: nil,
+		ValkeyClient: client,
 	}
-
-	// redis pubsub
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.redisCfg.addr,
-		Password: cfg.redisCfg.password,
-		DB:       cfg.redisCfg.db,
-	})
 
 	// minio s3
 	s3Client, err := storage.NewS3Client(storage.S3Config{
@@ -70,7 +54,6 @@ func main() {
 		config:   cfg,
 		logger:   logger,
 		queueMgr: queueMgr,
-		rdb:      rdb,
 		s3:       s3Client,
 	}
 

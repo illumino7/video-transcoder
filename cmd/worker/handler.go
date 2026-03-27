@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/hibiken/asynq"
 	"github.com/theluminousartemis/video-transcoder/internal/env"
 	"github.com/theluminousartemis/video-transcoder/internal/queue"
 )
@@ -20,11 +19,13 @@ type StatusMessage struct {
 }
 
 // HandleTranscodeTask downloads the video from S3, transcodes it, uploads HLS output back to S3.
-func (app *application) HandleTranscodeTask(ctx context.Context, t *asynq.Task) error {
+func (app *application) HandleTranscodeTask(ctx context.Context, payloadBytes []byte) error {
 	var payload queue.TranscodePayload
-	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return err
 	}
+
+	app.logger.Info("started transcode pipeline", "video_id", payload.VideoID, "ext", payload.Ext)
 
 	uploadsDir := env.GetString("UPLOADS_DIR", "./uploads")
 	outputsDir := env.GetString("OUTPUTS_DIR", "./outputs")
@@ -39,12 +40,13 @@ func (app *application) HandleTranscodeTask(ctx context.Context, t *asynq.Task) 
 	os.MkdirAll(uploadsDir, 0o755)
 	os.MkdirAll(outputsDir, 0o755)
 
-	// Download the raw video from MinIO to local filesystem (required for Docker bind-mount)
-	filename := filepath.Base(payload.S3Key)
+	// Build the local file references from S3 key infered by video ID and ext
+	s3Key := fmt.Sprintf("%s%s", payload.VideoID, payload.Ext)
+	filename := filepath.Base(s3Key)
 	localInput := filepath.Join(uploadsDir, filename)
 
-	app.logger.Info("downloading raw video from S3", "s3Key", payload.S3Key, "dest", localInput)
-	if err := app.s3.Download(ctx, UploadsBucket, payload.S3Key, localInput); err != nil {
+	app.logger.Info("downloading raw video from S3", "s3Key", s3Key, "dest", localInput)
+	if err := app.s3.Download(ctx, UploadsBucket, s3Key, localInput); err != nil {
 		return fmt.Errorf("failed to download video from S3: %w", err)
 	}
 	defer func() {
@@ -100,11 +102,7 @@ func (app *application) HandleTranscodeTask(ctx context.Context, t *asynq.Task) 
 
 	data, _ := json.Marshal(statusMessage)
 
-	if err := app.rdb.Publish(
-		ctx,
-		fmt.Sprintf("video:%s", payload.VideoID),
-		data,
-	).Err(); err != nil {
+	if err := app.queueMgr.ValkeyClient.Do(ctx, app.queueMgr.ValkeyClient.B().Publish().Channel(fmt.Sprintf("video:%s", payload.VideoID)).Message(string(data)).Build()).Error(); err != nil {
 		app.logger.Error("failed to publish message", "err", err)
 	}
 

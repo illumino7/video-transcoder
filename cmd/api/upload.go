@@ -78,10 +78,12 @@ func (app *application) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// All checks passed — enqueue the transcode job
-	if err := queue.EnqueueTranscode(app.queueMgr.AsynqClient, body.VideoID, body.S3Key); err != nil {
-		app.logger.Error("unable to enqueue transcode", "err", err)
-		app.internalServerError(w, r, err)
+	// Add transcode job to Valkey stream
+	ext := filepath.Ext(body.S3Key)
+	err = queue.EnqueueTranscode(r.Context(), app.queueMgr.ValkeyClient, body.VideoID, ext)
+	if err != nil {
+		app.logger.Error("failed to enqueue transcode job", "err", err, "video_id", body.VideoID)
+		http.Error(w, `{"error":"failed to queue job"}`, http.StatusInternalServerError)
 		return
 	}
 

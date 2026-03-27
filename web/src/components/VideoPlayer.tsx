@@ -8,11 +8,15 @@ import 'jb-videojs-hls-quality-selector/dist/videojs-hls-quality-selector.css';
 import 'videojs-contrib-quality-levels';
 import 'jb-videojs-hls-quality-selector';
 
+import { MINIO_URL } from '../config/constants';
+
+// ── Types ──────────────────────────────────────────────
+
 interface VideoPlayerProps {
   videoId: string;
 }
 
-const BACKEND_URL = 'http://localhost:3030';
+// ── Component ──────────────────────────────────────────
 
 export default function VideoPlayer({ videoId }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -21,7 +25,6 @@ export default function VideoPlayer({ videoId }: VideoPlayerProps) {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Create a fresh video element each time
     const videoEl = document.createElement('video');
     videoEl.classList.add('video-js', 'vjs-default-skin');
     videoEl.setAttribute('playsinline', '');
@@ -37,20 +40,16 @@ export default function VideoPlayer({ videoId }: VideoPlayerProps) {
 
     playerRef.current = player;
 
-    // Initialize quality levels plugin BEFORE setting the source
-    // so it can intercept HLS manifest parsing events
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (player as any).qualityLevels();
 
-    // Initialize quality selector plugin — adds the UI dropdown
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (player as any).hlsQualitySelector({
       displayCurrentQuality: true,
     });
 
-    // Set source AFTER plugins are initialized
     player.src({
-      src: `${BACKEND_URL}/videos/${videoId}/master.m3u8`,
+      src: `${MINIO_URL}/streaming/${videoId}/master.m3u8`,
       type: 'application/x-mpegURL',
     });
 
@@ -63,8 +62,8 @@ export default function VideoPlayer({ videoId }: VideoPlayerProps) {
   }, [videoId]);
 
   return (
-    <div className="player-container">
-      <div className="player-shell" ref={containerRef} />
+    <div className="w-full max-w-[960px] animate-fade-in-up">
+      <div className="rounded-2xl overflow-hidden border border-white/[0.08] shadow-[0_4px_40px_rgba(0,0,0,0.4)]" ref={containerRef} />
     </div>
   );
 }

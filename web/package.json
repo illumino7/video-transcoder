@@ -9,10 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
     "jb-videojs-hls-quality-selector": "^2.0.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.13.1",
+    "tailwindcss": "^4.2.2",
     "video.js": "^8.23.4",
     "videojs-contrib-quality-levels": "^4.1.0"
   },

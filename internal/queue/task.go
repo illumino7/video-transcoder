@@ -1,29 +1,33 @@
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 
-	"github.com/hibiken/asynq"
+	"github.com/valkey-io/valkey-go"
 )
 
+// TranscodePayload represents the data needed to transcode a video.
 type TranscodePayload struct {
 	VideoID string `json:"video_id"`
-	S3Key   string `json:"s3_key"`
+	Ext     string `json:"ext"` // e.g. .mp4
 }
 
-func EnqueueTranscode(client *asynq.Client, videoID, s3Key string) error {
-	slog.Info("enqueue transcode", "videoID", videoID, "s3Key", s3Key)
-	payload, err := json.Marshal(TranscodePayload{
+// EnqueueTranscode pushes a new transcode job into the transcode stream.
+func EnqueueTranscode(ctx context.Context, client valkey.Client, videoID string, ext string) error {
+	slog.Info("enqueue transcode", "videoID", videoID, "ext", ext)
+	payload := TranscodePayload{
 		VideoID: videoID,
-		S3Key:   s3Key,
-	})
+		Ext:     ext,
+	}
+	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	info, err := client.Enqueue(asynq.NewTask(TypeVideoTranscode, payload))
-	jsonInfo, _ := json.Marshal(info)
-	slog.Info("task information", "info", string(jsonInfo))
-	return err
+	cmd := client.B().Xadd().Key(StreamTranscode).Id("*").
+		FieldValue().FieldValue("payload", string(payloadBytes)).Build()
+
+	return client.Do(ctx, cmd).Error()
 }

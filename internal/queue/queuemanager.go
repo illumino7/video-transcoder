@@ -1,8 +1,14 @@
 package queue
 
-import "github.com/hibiken/asynq"
+import "github.com/valkey-io/valkey-go"
+
+const (
+	StreamTranscode      = "stream:transcode"
+	StreamTranscodeDLQ   = "stream:transcode:dlq"
+	ConsumerGroup        = "transcoder_group"
+	HashTranscodeRetries = "hash:transcode:retries"
+)
 
 type QueueManager struct {
-	AsynqClient *asynq.Client
-	AsynqServer *asynq.Server
+	ValkeyClient valkey.Client
 }

@@ -1,4 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { API_BASE, MAX_FILE_SIZE } from '../config/constants';
+
+// ── Types ──────────────────────────────────────────────
+
 interface UploadResponse {
   videoId: string;
   uploadUrl: string;
@@ -16,11 +20,15 @@ interface UploadProps {
   onComplete: (videoId: string) => void;
 }
 
+// ── Helpers ────────────────────────────────────────────
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// ── Component ──────────────────────────────────────────
 
 export default function Upload({ onComplete }: UploadProps) {
   const [file, setFile] = useState<File | null>(null);
@@ -31,20 +39,24 @@ export default function Upload({ onComplete }: UploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Cleanup SSE on unmount
   useEffect(() => {
     return () => {
       eventSourceRef.current?.close();
     };
   }, []);
 
-  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = e.target.files?.[0];
-    if (selected) {
-      setFile(selected);
-      setErrorMsg('');
-    }
-  }, []);
+  // ── File Selection ─────────────────────────────────
+
+  const handleFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const selected = e.target.files?.[0];
+      if (selected) {
+        setFile(selected);
+        setErrorMsg('');
+      }
+    },
+    [],
+  );
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -73,29 +85,36 @@ export default function Upload({ onComplete }: UploadProps) {
     if (inputRef.current) inputRef.current.value = '';
   }, []);
 
-  const connectSSE = useCallback((videoId: string) => {
-    const es = new EventSource(`http://localhost:3030/api/v1/status?id=${videoId}`);
-    eventSourceRef.current = es;
+  // ── SSE Connection ─────────────────────────────────
 
-    es.onmessage = (event: MessageEvent) => {
-      try {
-        const msg: StatusMessage = JSON.parse(event.data);
-        if (msg.processed) {
-          setProcessing(false);
-          es.close();
-          onComplete(videoId);
+  const connectSSE = useCallback(
+    (videoId: string) => {
+      const es = new EventSource(`${API_BASE}/status?id=${videoId}`);
+      eventSourceRef.current = es;
+
+      es.onmessage = (event: MessageEvent) => {
+        try {
+          const msg: StatusMessage = JSON.parse(event.data);
+          if (msg.processed) {
+            setProcessing(false);
+            es.close();
+            onComplete(videoId);
+          }
+        } catch (err) {
+          console.error('Invalid SSE message:', err);
         }
-      } catch (err) {
-        console.error('Invalid SSE message:', err);
-      }
-    };
+      };
 
-    es.onerror = () => {
-      setErrorMsg('Connection lost. Please refresh and try again.');
-      setProcessing(false);
-      es.close();
-    };
-  }, [onComplete]);
+      es.onerror = () => {
+        setErrorMsg('Connection lost. Please refresh and try again.');
+        setProcessing(false);
+        es.close();
+      };
+    },
+    [onComplete],
+  );
+
+  // ── Upload Flow ────────────────────────────────────
 
   const uploadVideo = useCallback(async () => {
     if (!file) {
@@ -103,19 +122,22 @@ export default function Upload({ onComplete }: UploadProps) {
       return;
     }
 
+    if (file.size > MAX_FILE_SIZE) {
+      setErrorMsg('File exceeds the 100 MB limit.');
+      return;
+    }
+
     setUploading(true);
     setErrorMsg('');
 
     try {
-      // Step 1: Get presigned PUT URL
       const presignRes = await fetch(
-        `http://localhost:3030/api/v1/upload/presign?filename=${encodeURIComponent(file.name)}`
+        `${API_BASE}/upload/presign?filename=${encodeURIComponent(file.name)}`,
       );
       if (!presignRes.ok) throw new Error(`Presign failed: ${presignRes.status}`);
 
       const data: UploadResponse = await presignRes.json();
 
-      // Step 2: Upload file directly to MinIO via presigned URL
       const putRes = await fetch(data.uploadUrl, {
         method: 'PUT',
         headers: { 'Content-Type': data.contentType },
@@ -123,8 +145,7 @@ export default function Upload({ onComplete }: UploadProps) {
       });
       if (!putRes.ok) throw new Error(`Direct upload failed: ${putRes.status}`);
 
-      // Step 3: Verify upload + enqueue transcode
-      const completeRes = await fetch('http://localhost:3030/api/v1/upload', {
+      const completeRes = await fetch(`${API_BASE}/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ videoId: data.videoId, s3Key: data.s3Key }),
@@ -143,14 +164,15 @@ export default function Upload({ onComplete }: UploadProps) {
     }
   }, [file, connectSSE]);
 
-  // ── Processing State ──
+  // ── Render: Processing ─────────────────────────────
+
   if (processing) {
     return (
-      <div className="upload-card">
-        <div className="processing-card">
-          <div className="processing-spinner" />
-          <h3>Transcoding your video</h3>
-          <p>
+      <div className="bg-white/[0.06] backdrop-blur-2xl border border-white/[0.08] rounded-3xl p-10 transition-all duration-300 hover:border-indigo-500/40 hover:shadow-[0_0_40px_rgba(99,102,241,0.25)]">
+        <div className="text-center py-16 px-8 animate-[fadeIn_0.5s_ease]">
+          <div className="w-14 h-14 border-3 border-zinc-700 border-t-accent rounded-full mx-auto mb-6 animate-spin-slow" />
+          <h3 className="text-lg font-semibold text-zinc-100 mb-2">Transcoding your video</h3>
+          <p className="text-zinc-400 text-sm">
             Encoding multiple quality levels<span className="processing-dots" />
           </p>
         </div>
@@ -158,11 +180,20 @@ export default function Upload({ onComplete }: UploadProps) {
     );
   }
 
-  // ── Upload State ──
+  // ── Render: Upload ─────────────────────────────────
+
   return (
-    <div className="upload-card">
+    <div className="bg-white/[0.06] backdrop-blur-2xl border border-white/[0.08] rounded-3xl p-10 transition-all duration-300 hover:border-indigo-500/40 hover:shadow-[0_0_40px_rgba(99,102,241,0.25)]">
+      {/* Drop Zone */}
       <div
-        className={`drop-zone${dragging ? ' dragging' : ''}`}
+        className={`
+          relative overflow-hidden border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer
+          transition-all duration-300
+          ${dragging
+            ? 'border-accent bg-indigo-500/5'
+            : 'border-white/[0.08] hover:border-accent hover:bg-indigo-500/5'
+          }
+        `}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
@@ -171,33 +202,37 @@ export default function Upload({ onComplete }: UploadProps) {
         tabIndex={0}
         aria-label="Drop video file here or click to browse"
       >
-        <div className="drop-zone-icon">🎬</div>
-        <div className="drop-zone-text">
-          <p>
-            Drag and drop your video here, or <strong>browse</strong>
+        <div className="text-4xl mb-4 relative z-10">🎬</div>
+        <div className="relative z-10">
+          <p className="text-zinc-400 text-[0.95rem]">
+            Drag and drop your video here, or{' '}
+            <strong className="text-accent-light font-semibold">browse</strong>
           </p>
-          <small>Supports all major video formats • Max 100 MB</small>
+          <small className="block mt-2 text-zinc-500 text-xs">
+            Supports all major video formats • Max 100 MB
+          </small>
         </div>
       </div>
 
       <input
         ref={inputRef}
         id="file-input"
-        className="visually-hidden"
+        className="sr-only"
         type="file"
         accept="video/*"
         onChange={handleFileChange}
       />
 
+      {/* File Info */}
       {file && (
-        <div className="file-info">
-          <span className="file-info-icon">🎥</span>
-          <div className="file-info-details">
-            <div className="file-info-name">{file.name}</div>
-            <div className="file-info-size">{formatFileSize(file.size)}</div>
+        <div className="flex items-center gap-3 mt-5 py-3.5 px-4 bg-white/[0.04] border border-white/[0.08] rounded-xl animate-[fadeIn_0.3s_ease]">
+          <span className="text-xl shrink-0">🎥</span>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-medium text-zinc-200 truncate">{file.name}</div>
+            <div className="text-xs text-zinc-500">{formatFileSize(file.size)}</div>
           </div>
           <button
-            className="file-info-remove"
+            className="bg-transparent border-none text-zinc-500 cursor-pointer p-1 text-lg transition-colors duration-200 shrink-0 hover:text-error"
             onClick={removeFile}
             aria-label="Remove file"
           >
@@ -206,16 +241,29 @@ export default function Upload({ onComplete }: UploadProps) {
         </div>
       )}
 
-      {errorMsg && <div className="error-msg">{errorMsg}</div>}
+      {/* Error */}
+      {errorMsg && (
+        <div className="mt-4 py-3 px-4 bg-red-400/10 border border-red-400/20 rounded-lg text-error text-sm animate-shake">
+          {errorMsg}
+        </div>
+      )}
 
+      {/* Upload Button */}
       <button
-        className="upload-btn"
+        className="
+          relative overflow-hidden flex items-center justify-center gap-2 mt-6 w-full py-3.5 px-6
+          bg-gradient-to-br from-accent via-accent-purple to-accent-light
+          text-white font-semibold text-[0.95rem] border-none rounded-xl cursor-pointer
+          transition-all duration-300 active:scale-[0.98]
+          disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100
+          hover:brightness-110
+        "
         onClick={uploadVideo}
         disabled={!file || uploading}
       >
         {uploading ? (
           <>
-            <span className="processing-spinner" style={{ width: 18, height: 18, margin: 0, borderWidth: 2 }} />
+            <span className="w-[18px] h-[18px] border-2 border-white/30 border-t-white rounded-full animate-spin-slow" />
             Uploading…
           </>
         ) : (

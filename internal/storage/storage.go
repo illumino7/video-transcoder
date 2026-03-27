@@ -51,10 +51,37 @@ func NewS3Client(cfg S3Config, logger *slog.Logger) (*S3Client, error) {
 		}
 	}
 
-	return &S3Client{
+	s := &S3Client{
 		client: client,
 		logger: logger,
-	}, nil
+	}
+
+	// Set read-only public policy on the streaming bucket so clients
+	// can fetch HLS segments directly from MinIO without proxying.
+	for _, bucket := range cfg.Buckets {
+		if bucket == "streaming" {
+			if err := s.SetBucketReadOnlyPolicy(ctx, bucket); err != nil {
+				return nil, fmt.Errorf("failed to set read-only policy on %s: %w", bucket, err)
+			}
+			logger.Info("set read-only public policy on bucket", "bucket", bucket)
+		}
+	}
+
+	return s, nil
+}
+
+// SetBucketReadOnlyPolicy applies a public read-only policy to a MinIO bucket.
+func (s *S3Client) SetBucketReadOnlyPolicy(ctx context.Context, bucket string) error {
+	policy := fmt.Sprintf(`{
+		"Version": "2012-10-17",
+		"Statement": [{
+			"Effect": "Allow",
+			"Principal": {"AWS": ["*"]},
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::%s/*"]
+		}]
+	}`, bucket)
+	return s.client.SetBucketPolicy(ctx, bucket, policy)
 }
 
 // Upload uploads a single file to S3.
