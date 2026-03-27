@@ -26,12 +26,14 @@ func main() {
 		concurrency: env.GetInt("WORKER_CONCURRENCY", 2),
 	}
 
-	// logger
+	// Initialize structured logging. We use the standard library's slog package
+	// configured for stdout to natively integrate with container logging drivers.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
-	// valkey client
+	// Establish connection to the Valkey cluster. This acts as our primary message broker
+	// used for streaming job dispatch and inter-node event publication.
 	logger.Info("connecting valkey client to redis", "addr", config.redisAddr)
 	client, err := valkey.NewClient(valkey.ClientOption{
 		InitAddress: []string{config.redisAddr},
@@ -42,7 +44,8 @@ func main() {
 	}
 	defer client.Close()
 
-	// minio s3
+	// Instantiate the S3 client for interacting with MinIO. This client handles both
+	// retrieving user video uploads and pushing the finalized HLS streams.
 	s3Client, err := storage.NewS3Client(storage.S3Config{
 		Endpoint:  env.GetString("MINIO_ENDPOINT", "localhost:9000"),
 		AccessKey: env.GetString("MINIO_ACCESS_KEY", "minioadmin"),
@@ -67,11 +70,15 @@ func main() {
 		s3:       s3Client,
 	}
 
-	// Create Consumer Group (ignore error if it already exists)
+	// Initialize the Valkey stream consumer group if it doesn't already exist.
+	// This allows our worker pool to safely consume messages under the same group name,
+	// preventing multiple workers from processing the exact same video twice.
+	// We intentionally silently ignore the error as it safely fails if the group existed.
 	ctx := context.Background()
 	_ = client.Do(ctx, client.B().XgroupCreate().Key(queue.StreamTranscode).Group(queue.ConsumerGroup).Id("0").Mkstream().Build())
 
-	// Start Worker Goroutines
+	// Spin up the configured number of concurrent worker goroutines based on WORKER_CONCURRENCY.
+	// Each worker will independently drain pending messages and then block on new tasks.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -84,11 +91,13 @@ func main() {
 		go runValkeyWorker(ctx, &app, consumerName, &wg)
 	}
 
-	// Start DLQ Janitor Goroutine
+	// Launch a solitary background janitor goroutine responsible for sweeping stuck tasks
+	// from dead workers and routing permanently failed payloads to the Dead Letter Queue.
 	wg.Add(1)
 	go runValkeyJanitor(ctx, &app, &wg)
 
-	// Wait for termination signal
+	// Block the main thread and listen for OS interruption signals (SIGINT/SIGTERM) to gracefully
+	// orchestrate shutting down, giving active workers a chance to finish up current tasks.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

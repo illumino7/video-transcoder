@@ -28,6 +28,8 @@ type application struct {
 	s3       *storage.S3Client
 }
 
+// mount composes the application's routing tree. It binds required middleware
+// such as CORS, Request IDs, and panic recovery, and registers the API v1 endpoints.
 func (app *application) mount() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -52,6 +54,7 @@ func (app *application) mount() *chi.Mux {
 	return r
 }
 
+// start spins up an HTTP server with the provided router.
 func (app *application) start(router http.Handler) error {
 	srv := http.Server{
 		Addr:    app.config.addr,

@@ -16,12 +16,13 @@ func main() {
 		redisAddr: env.GetString("REDIS_ADDR", "localhost:6379"),
 	}
 
-	// logger
+	// Initialize structured logging for the API layer to output in standard text format.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
-	// valkey client
+	// Connect to the Valkey (Redis-compatible) cluster. The API leverages Valkey for 
+	// dispatching transcode jobs downstream and subscribing to completion events.
 	logger.Info("connecting valkey client to redis", "addr", cfg.redisAddr)
 	client, err := valkey.NewClient(valkey.ClientOption{
 		InitAddress: []string{cfg.redisAddr},
@@ -36,7 +37,7 @@ func main() {
 		ValkeyClient: client,
 	}
 
-	// minio s3
+	// Initialize the S3 client to generate presigned upload URLs for user files.
 	s3Client, err := storage.NewS3Client(storage.S3Config{
 		Endpoint:  env.GetString("MINIO_ENDPOINT", "localhost:9000"),
 		AccessKey: env.GetString("MINIO_ACCESS_KEY", "minioadmin"),
@@ -57,10 +58,10 @@ func main() {
 		s3:       s3Client,
 	}
 
-	// mux
+	// Mount the router with all registered routes and middleware attached.
 	mux := app.mount()
 
-	// starting the server
+	// Launch the HTTP server on the configured address. This call will block indefinitely.
 	logger.Info("starting the server", "addr", app.config.addr)
 	if err := app.start(mux); err != nil {
 		logger.Error("error starting server", "addr", app.config.addr)

@@ -1,3 +1,5 @@
+// Package env provides strongly-typed utility wrappers for retrieving environment
+// variables with safe fallback defaults, preventing boilerplate parsing logic throughout the app.
 package env
 
 import (
@@ -6,6 +8,7 @@ import (
 	"time"
 )
 
+// GetString abstracts reading an environment variable, returning a guaranteed fallback string if absent.
 func GetString(key, fallback string) string {
 	key, ok := os.LookupEnv(key)
 	if !ok {

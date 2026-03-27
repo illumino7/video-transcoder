@@ -21,11 +21,13 @@ func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request)
 
 	ctx := r.Context()
 	
-	// Create channels for streaming
+	// Channels to manage the asynchronous stream of messages and catch potential connection errors.
 	msgCh := make(chan string)
 	errCh := make(chan error)
 
-	// In a goroutine, listen to Valkey pub/sub
+	// Spin up a background worker to continuously listen for pub/sub events on this video's channel.
+	// We do this concurrently so the primary handler thread remains unblocked to manage
+	// the long-lived SSE HTTP connection cleanly.
 	go func() {
 		channelName := fmt.Sprintf("video:%s", videoID)
 		err := app.queueMgr.ValkeyClient.Receive(ctx, app.queueMgr.ValkeyClient.B().Subscribe().Channel(channelName).Build(), func(msg valkey.PubSubMessage) {
