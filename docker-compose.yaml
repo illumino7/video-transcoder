@@ -1,37 +1,17 @@
 services:
+  # ── Infrastructure ──────────────────────────────────
+  
   valkey:
     image: valkey/valkey:alpine
-    container_name: hls-transcoder-valkey
+    container_name: adaaptiv-valkey
     restart: unless-stopped
     ports:
       - "6379:6379"
     command: valkey-server --save 60 1 --loglevel warning
-  
-  redis-commander:
-    container_name: hls-transcoder-redis-commander
-    image: rediscommander/redis-commander:latest
-    environment:
-      - REDIS_HOSTS=local:valkey:6379
-    ports:
-      - "8081:8081"
-    depends_on:
-      - valkey
-    restart: unless-stopped
-  
-  asynqmon:
-    image: hibiken/asynqmon
-    container_name: hls-transcoder-asynqmon
-    ports:
-      - "8080:8080"
-    depends_on:
-      - valkey
-    environment:
-      - REDIS_URL=redis://valkey:6379/0
-    restart: unless-stopped
-  
+
   minio:
     image: minio/minio:latest
-    container_name: hls-transcoder-minio
+    container_name: adaaptiv-minio
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -43,5 +23,73 @@ services:
       - minio_data:/data
     restart: unless-stopped
 
+  # ── Application ─────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      dockerfile: cmd/api/Dockerfile
+    container_name: adaaptiv-api
+    ports:
+      - "3030:3030"
+    environment:
+      - ADDR=:3030
+      - REDIS_ADDR=valkey:6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_USE_SSL=false
+    depends_on:
+      - valkey
+      - minio
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: cmd/worker/Dockerfile
+    container_name: adaaptiv-worker
+    environment:
+      - REDIS_ADDR=valkey:6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_USE_SSL=false
+      - WORKER_CONCURRENCY=2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - worker_uploads:/app/uploads
+      - worker_outputs:/app/outputs
+    depends_on:
+      - valkey
+      - minio
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    container_name: adaaptiv-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # ── Observability ───────────────────────────────────
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: adaaptiv-redis-commander
+    environment:
+      - REDIS_HOSTS=local:valkey:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - valkey
+    restart: unless-stopped
+
 volumes:
   minio_data:
+  worker_uploads:
+  worker_outputs:
