@@ -1,4 +1,5 @@
 import { useRef, useEffect } from 'react';
+import './videojs-globals'; // MUST be imported first to establish window.videojs before plugin modules execute
 import videojs from 'video.js';
 import type Player from 'video.js/dist/types/player';
 
@@ -45,12 +46,20 @@ export default function VideoPlayer({ videoId }: VideoPlayerProps) {
     playerRef.current = player;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (player as any).qualityLevels();
+    if (typeof (player as any).qualityLevels === 'function') {
+      (player as any).qualityLevels();
+    } else {
+      console.warn('qualityLevels plugin not registered on video.js player');
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (player as any).hlsQualitySelector({
-      displayCurrentQuality: true,
-    });
+    if (typeof (player as any).hlsQualitySelector === 'function') {
+      (player as any).hlsQualitySelector({
+        displayCurrentQuality: true,
+      });
+    } else {
+      console.warn('hlsQualitySelector plugin not registered on video.js player');
+    }
 
     player.src({
       src: `${MINIO_URL}/streaming/${videoId}/master.m3u8`,
@@ -68,8 +77,8 @@ export default function VideoPlayer({ videoId }: VideoPlayerProps) {
   }, [videoId]);
 
   return (
-    <div className="w-full max-w-[960px] animate-fade-in-up">
-      <div className="rounded-2xl overflow-hidden border border-white/[0.08] shadow-[0_4px_40px_rgba(0,0,0,0.4)]" ref={containerRef} />
+    <div className="w-full max-w-3xl mx-auto animate-fade-in-up">
+      <div className="rounded-md overflow-hidden border border-zinc-800 bg-black" ref={containerRef} />
     </div>
   );
 }

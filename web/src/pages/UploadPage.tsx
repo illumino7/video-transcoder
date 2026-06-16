@@ -9,9 +9,9 @@ export default function UploadPage() {
   const navigate = useNavigate();
 
   return (
-    <div className="flex flex-col items-center min-h-dvh p-8 max-sm:p-6">
-      <Header />
-      <div className="w-full max-w-[960px] animate-fade-in-up">
+    <div className="flex flex-col items-center justify-center min-h-dvh p-8 max-sm:p-6 bg-black text-white selection:bg-zinc-800">
+      <div className="w-full max-w-xl animate-fade-in-up">
+        <Header />
         <Upload onComplete={(videoId) => navigate(`/video/${videoId}`)} />
       </div>
     </div>
