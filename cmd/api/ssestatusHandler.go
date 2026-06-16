@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,6 +9,13 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
+type StatusMessage struct {
+	UUID      string `json:"id"`
+	Processed bool   `json:"processed"`
+	Status    string `json:"status"`
+}
+
+// ssestatusHandler stream status updates for a video transcode request using SSE.
 func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request) {
 	videoID := r.URL.Query().Get("id")
 	if videoID == "" {
@@ -20,14 +28,10 @@ func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Connection", "keep-alive")
 
 	ctx := r.Context()
-	
-	// Channels to manage the asynchronous stream of messages and catch potential connection errors.
-	msgCh := make(chan string)
-	errCh := make(chan error)
+	msgCh := make(chan string, 1)
+	errCh := make(chan error, 1)
 
-	// Spin up a background worker to continuously listen for pub/sub events on this video's channel.
-	// We do this concurrently so the primary handler thread remains unblocked to manage
-	// the long-lived SSE HTTP connection cleanly.
+	// Subscribe first to ensure no event is missed.
 	go func() {
 		channelName := fmt.Sprintf("video:%s", videoID)
 		err := app.queueMgr.ValkeyClient.Receive(ctx, app.queueMgr.ValkeyClient.B().Subscribe().Channel(channelName).Build(), func(msg valkey.PubSubMessage) {
@@ -37,6 +41,24 @@ func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request)
 			errCh <- err
 		}
 	}()
+
+	// Query DB after subscribing to catch fast transcodes.
+	video, err := app.store.Videos.Get(ctx, videoID)
+	if err == nil {
+		if video.Status == "COMPLETED" || video.Status == "FAILED" {
+			msg := StatusMessage{
+				UUID:      videoID,
+				Processed: true,
+				Status:    video.Status,
+			}
+			data, _ := json.Marshal(msg)
+			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			return
+		}
+	}
 
 	flusher, _ := w.(http.Flusher)
 
@@ -50,6 +72,7 @@ func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request)
 		case msg := <-msgCh:
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
+			return
 		}
 	}
 }

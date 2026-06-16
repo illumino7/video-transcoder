@@ -9,8 +9,7 @@ const (
 	HashTranscodeRetries = "hash:transcode:retries"
 )
 
-// QueueManager bundles the Valkey client dependency to provide centralized access
-// across HTTP handlers, async workers, and background janitor routines.
+// QueueManager wraps the Valkey client to share connections.
 type QueueManager struct {
 	ValkeyClient valkey.Client
 }

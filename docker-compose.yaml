@@ -23,6 +23,34 @@ services:
       - minio_data:/data
     restart: unless-stopped
 
+  db:
+    image: postgres:16-alpine
+    container_name: adaaptiv-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=transcoder
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d transcoder"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate
+    container_name: adaaptiv-migrate
+    volumes:
+      - ./migrations:/migrations
+    command: -path=/migrations -database=postgres://postgres:postgres@db:5432/transcoder?sslmode=disable up
+    depends_on:
+      db:
+        condition: service_healthy
+
   # ── Application ─────────────────────────────────────
 
   api:
@@ -39,9 +67,17 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_USE_SSL=false
+      - MINIO_PUBLIC_URL=http://localhost:9000
+      - DB_DSN=postgres://postgres:postgres@db:5432/transcoder?sslmode=disable
     depends_on:
-      - valkey
-      - minio
+      valkey:
+        condition: service_started
+      minio:
+        condition: service_started
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   worker:
@@ -56,13 +92,36 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_USE_SSL=false
       - WORKER_CONCURRENCY=2
+      - DB_DSN=postgres://postgres:postgres@db:5432/transcoder?sslmode=disable
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - worker_uploads:/app/uploads
       - worker_outputs:/app/outputs
     depends_on:
-      - valkey
-      - minio
+      valkey:
+        condition: service_started
+      minio:
+        condition: service_started
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  outbox:
+    build:
+      context: .
+      dockerfile: cmd/outbox/Dockerfile
+    container_name: adaaptiv-outbox
+    environment:
+      - REDIS_ADDR=valkey:6379
+      - DB_DSN=postgres://postgres:postgres@db:5432/transcoder?sslmode=disable
+    depends_on:
+      valkey:
+        condition: service_started
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   frontend:
@@ -93,3 +152,4 @@ volumes:
   minio_data:
   worker_uploads:
   worker_outputs:
+  pg_data:

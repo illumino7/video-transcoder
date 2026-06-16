@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/worker ./cmd/worker
 # ── Runtime Stage ────────────────────────────────────
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates docker-cli bash
+RUN apk add --no-cache ca-certificates ffmpeg bash
 
 COPY --from=builder /bin/worker /bin/worker
 COPY scripts/ /scripts/

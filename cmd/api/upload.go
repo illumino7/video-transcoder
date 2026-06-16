@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,10 +13,7 @@ import (
 	"github.com/theluminousartemis/video-transcoder/internal/storage"
 )
 
-// presignUpload generates a time-bound presigned PUT URL granting the client permission
-// to upload their raw video file directly into the MinIO storage bucket. This architectural
-// pattern avoids routing heavy video traffic through the API server memory.
-// Endpoint: GET /api/v1/upload/presign?filename=video.mkv
+// presignUpload generates a presigned URL allowing direct raw uploads to S3/MinIO.
 func (app *application) presignUpload(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
@@ -28,7 +26,7 @@ func (app *application) presignUpload(w http.ResponseWriter, r *http.Request) {
 	objectKey := fmt.Sprintf("%s%s", id, ext)
 	contentType := storage.DetectContentType(filename)
 
-	presignedURL, err := app.s3.PresignedPutURL(r.Context(), UploadsBucket, objectKey, 15*time.Minute)
+	presignedURL, err := app.s3.PresignedPutURL(r.Context(), UploadsBucket, objectKey, 15*time.Minute, contentType)
 	if err != nil {
 		app.internalServerError(w, r, err)
 		return
@@ -42,10 +40,7 @@ func (app *application) presignUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// uploadComplete serves as the webhook or callback invoked by the client after they 
-// successfully upload their file to the presigned URL. It defensively verifies the
-// upload's existence and properties before safely enqueuing a transcode job.
-// Endpoint: POST /api/v1/upload payload: { "videoId": "uuid", "s3Key": "uuid.mkv" }
+// uploadComplete handles client upload confirmations and enqueues transcode jobs.
 func (app *application) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		VideoID string `json:"videoId"`
@@ -60,34 +55,40 @@ func (app *application) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Defensively verify the object actually made it to the storage bucket before 
-	// trusting the client's completion claim.
 	info, err := app.s3.StatObject(r.Context(), UploadsBucket, body.S3Key)
 	if err != nil {
 		app.badRequestError(w, r, fmt.Errorf("file not found in storage: %w", err))
 		return
 	}
 
-	// Enforce a strict file size ceiling (100 MB) to prevent exhausting queue/worker resources.
 	const maxSize = 100 * 1024 * 1024
 	if info.Size > maxSize {
 		app.badRequestError(w, r, fmt.Errorf("file too large: %d bytes (max %d)", info.Size, maxSize))
 		return
 	}
 
-	// Ensure the uploaded object appears to be a valid, supported media format.
 	ct := storage.DetectContentType(body.S3Key)
 	if ct == "application/octet-stream" {
 		app.badRequestError(w, r, errors.New("unsupported file format"))
 		return
 	}
 
-	// Dispatch the transcoding work item to the Valkey stream so background workers can pick it up.
 	ext := filepath.Ext(body.S3Key)
-	err = queue.EnqueueTranscode(r.Context(), app.queueMgr.ValkeyClient, body.VideoID, ext)
+	payload := queue.TranscodePayload{
+		VideoID: body.VideoID,
+		Ext:     ext,
+	}
+	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		app.logger.Error("failed to enqueue transcode job", "err", err, "video_id", body.VideoID)
-		http.Error(w, `{"error":"failed to queue job"}`, http.StatusInternalServerError)
+		app.logger.Error("failed to marshal transcode payload", "err", err, "video_id", body.VideoID)
+		app.internalServerError(w, r, err)
+		return
+	}
+
+	err = app.store.Videos.CreateWithOutbox(r.Context(), body.VideoID, ext, string(payloadBytes))
+	if err != nil {
+		app.logger.Error("failed to save transcode job to outbox", "err", err, "video_id", body.VideoID)
+		app.internalServerError(w, r, err)
 		return
 	}
 

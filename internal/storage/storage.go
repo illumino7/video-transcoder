@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,8 +17,9 @@ import (
 )
 
 type S3Client struct {
-	client *minio.Client
-	logger *slog.Logger
+	client        *minio.Client
+	presignClient *minio.Client
+	logger        *slog.Logger
 }
 
 type S3Config struct {
@@ -25,56 +27,73 @@ type S3Config struct {
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
-	Buckets   []string // list of buckets to auto-create
+	Buckets   []string
+	PublicURL string
 }
 
+// NewS3Client initializes and configures the S3 client connection and buckets.
 func NewS3Client(cfg S3Config, logger *slog.Logger) (*S3Client, error) {
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: cfg.UseSSL,
+		Region: "us-east-1",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create minio client: %w", err)
+		return nil, fmt.Errorf("create client: %w", err)
 	}
 
 	ctx := context.Background()
 	for _, bucket := range cfg.Buckets {
 		exists, err := client.BucketExists(ctx, bucket)
 		if err != nil {
-			return nil, fmt.Errorf("failed to check bucket %s: %w", bucket, err)
+			return nil, fmt.Errorf("check bucket %s: %w", bucket, err)
 		}
 		if !exists {
 			if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
-				return nil, fmt.Errorf("failed to create bucket %s: %w", bucket, err)
+				return nil, fmt.Errorf("create bucket %s: %w", bucket, err)
 			}
-			logger.Info("created minio bucket", "bucket", bucket)
+			logger.Info("created bucket", "bucket", bucket)
 		}
 	}
 
-	s := &S3Client{
-		client: client,
-		logger: logger,
+	presignClient := client
+	if cfg.PublicURL != "" {
+		u, err := url.Parse(cfg.PublicURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse public URL: %w", err)
+		}
+		
+		useSSL := u.Scheme == "https"
+		pc, err := minio.New(u.Host, &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+			Secure: useSSL,
+			Region: "us-east-1",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create presign client: %w", err)
+		}
+		presignClient = pc
 	}
 
-	// Apply a public read-only bucket policy specifically to the streaming bucket.
-	// This architectural choice allows end-users' video players to fetch HLS
-	// playlist manifests and raw .ts segments directly from MinIO, bypassing
-	// the API servers entirely to save bandwidth and compute resources.
+	s := &S3Client{
+		client:        client,
+		presignClient: presignClient,
+		logger:        logger,
+	}
+
 	for _, bucket := range cfg.Buckets {
 		if bucket == "streaming" {
 			if err := s.SetBucketReadOnlyPolicy(ctx, bucket); err != nil {
-				return nil, fmt.Errorf("failed to set read-only policy on %s: %w", bucket, err)
+				return nil, fmt.Errorf("set read-only policy on %s: %w", bucket, err)
 			}
-			logger.Info("set read-only public policy on bucket", "bucket", bucket)
+			logger.Info("set read-only policy on bucket", "bucket", bucket)
 		}
 	}
 
 	return s, nil
 }
 
-// SetBucketReadOnlyPolicy constructs and applies an AWS IAM-compliant JSON bucket policy
-// that grants universal (anonymous) read access (`s3:GetObject`) to all objects within
-// the designated bucket.
+// SetBucketReadOnlyPolicy sets an anonymous read-only policy on the bucket.
 func (s *S3Client) SetBucketReadOnlyPolicy(ctx context.Context, bucket string) error {
 	policy := fmt.Sprintf(`{
 		"Version": "2012-10-17",
@@ -88,21 +107,19 @@ func (s *S3Client) SetBucketReadOnlyPolicy(ctx context.Context, bucket string) e
 	return s.client.SetBucketPolicy(ctx, bucket, policy)
 }
 
-// Upload pushes a single local file to the remote storage bucket. It allows specifying
-// the Content-Type to ensure proper HTTP headers when clients later fetch the file.
+// Upload transfers a local file to S3.
 func (s *S3Client) Upload(ctx context.Context, bucket, objectKey, filePath, contentType string) error {
 	_, err := s.client.FPutObject(ctx, bucket, objectKey, filePath, minio.PutObjectOptions{
 		ContentType: contentType,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to upload %s to %s: %w", objectKey, bucket, err)
+		return fmt.Errorf("upload %s: %w", objectKey, err)
 	}
 	s.logger.Info("uploaded to s3", "bucket", bucket, "key", objectKey)
 	return nil
 }
 
-// UploadDir recursively traverses a local directory tree and uploads all discovered
-// files to S3, mirroring the folder structure under the specified target prefix.
+// UploadDir recursively uploads all files in a directory to S3.
 func (s *S3Client) UploadDir(ctx context.Context, bucket, prefix, localDir string) error {
 	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -118,8 +135,6 @@ func (s *S3Client) UploadDir(ctx context.Context, bucket, prefix, localDir strin
 		}
 
 		objectKey := filepath.Join(prefix, relPath)
-		// Coerce all path separators to forward slashes (Unix-style). S3 strictly 
-		// uses forward slashes internally for simulated directory hierarchies.
 		objectKey = strings.ReplaceAll(objectKey, string(os.PathSeparator), "/")
 
 		contentType := DetectContentType(path)
@@ -127,60 +142,70 @@ func (s *S3Client) UploadDir(ctx context.Context, bucket, prefix, localDir strin
 	})
 }
 
-// GetObject retrieves an object from S3 and returns it as an io.ReadCloser (minio.Object).
+// Delete removes an object from the bucket.
+func (s *S3Client) Delete(ctx context.Context, bucket, objectKey string) error {
+	err := s.client.RemoveObject(ctx, bucket, objectKey, minio.RemoveObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("delete %s from %s: %w", objectKey, bucket, err)
+	}
+	s.logger.Info("deleted from s3", "bucket", bucket, "key", objectKey)
+	return nil
+}
+
+// GetObject retrieves an object payload from S3.
 func (s *S3Client) GetObject(ctx context.Context, bucket, objectKey string) (*minio.Object, error) {
 	obj, err := s.client.GetObject(ctx, bucket, objectKey, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get object %s from %s: %w", objectKey, bucket, err)
+		return nil, fmt.Errorf("get object %s: %w", objectKey, err)
 	}
 	return obj, nil
 }
 
-// StatObject returns object metadata (useful for fetching Content-Length and Content-Type
-// before committing to a full download).
+// StatObject checks object metadata.
 func (s *S3Client) StatObject(ctx context.Context, bucket, objectKey string) (minio.ObjectInfo, error) {
 	return s.client.StatObject(ctx, bucket, objectKey, minio.StatObjectOptions{})
 }
 
-// PresignedPutURL generates a temporary presigned PUT URL granting clients direct
-// upload access to a specific object key without needing broader MinIO credentials.
-func (s *S3Client) PresignedPutURL(ctx context.Context, bucket, objectKey string, expiry time.Duration) (*url.URL, error) {
-	presignedURL, err := s.client.PresignedPutObject(ctx, bucket, objectKey, expiry)
+// PresignedPutURL generates a temporary upload URL.
+func (s *S3Client) PresignedPutURL(ctx context.Context, bucket, objectKey string, expiry time.Duration, contentType string) (*url.URL, error) {
+	header := make(http.Header)
+	header.Set("Content-Type", contentType)
+
+	presignedURL, err := s.presignClient.PresignHeader(ctx, http.MethodPut, bucket, objectKey, expiry, nil, header)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate presigned put URL for %s: %w", objectKey, err)
+		return nil, fmt.Errorf("generate presigned put URL: %w", err)
 	}
-	s.logger.Info("generated presigned put URL", "bucket", bucket, "key", objectKey)
+	s.logger.Info("generated presigned put URL", "bucket", bucket, "key", objectKey, "url", presignedURL.String())
 	return presignedURL, nil
 }
 
-// Download streams an object from S3 and writes it safely to a local destination file.
+// Download saves an S3 object to the local filesystem.
 func (s *S3Client) Download(ctx context.Context, bucket, objectKey, destPath string) error {
 	obj, err := s.client.GetObject(ctx, bucket, objectKey, minio.GetObjectOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get object %s: %w", objectKey, err)
+		return fmt.Errorf("get object: %w", err)
 	}
 	defer obj.Close()
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return fmt.Errorf("failed to create directory for %s: %w", destPath, err)
+		return fmt.Errorf("create dir: %w", err)
 	}
 
 	file, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file %s: %w", destPath, err)
+		return fmt.Errorf("create file: %w", err)
 	}
 	defer file.Close()
 
 	if _, err := io.Copy(file, obj); err != nil {
-		return fmt.Errorf("failed to download %s: %w", objectKey, err)
+		return fmt.Errorf("copy object: %w", err)
 	}
 
 	s.logger.Info("downloaded from s3", "bucket", bucket, "key", objectKey, "dest", destPath)
 	return nil
 }
 
-// DetectContentType infers the appropriate MIME type for video and HLS files based on
-// their file extension. Defaults to application/octet-stream if unrecognized.
+// DetectContentType determines the MIME type based on file extension.
 func DetectContentType(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {

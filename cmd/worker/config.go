@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/theluminousartemis/video-transcoder/internal/db"
 	"github.com/theluminousartemis/video-transcoder/internal/queue"
 	"github.com/theluminousartemis/video-transcoder/internal/storage"
 )
@@ -20,17 +21,15 @@ type application struct {
 	config   *config
 	queueMgr queue.QueueManager
 	s3       *storage.S3Client
+	store    *db.Storage
 }
 
+// runValkeyWorker processes incoming transcode messages from Valkey stream.
 func runValkeyWorker(ctx context.Context, app *application, consumerName string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	vClient := app.queueMgr.ValkeyClient
 	app.logger.Info("started valkey worker", "consumer", consumerName)
 
-	// Phase 1: Recover Unacknowledged Tasks (PEL)
-	// We first query the Pending Entries List specifically assigned to this consumer name.
-	// Using ID "0" without blocking allows us to immediately resume messages we previously
-	// picked up but failed to completely process due to a process crash or restart.
 	app.logger.Info("draining PEL for crashed jobs", "consumer", consumerName)
 	for {
 		if ctx.Err() != nil {
@@ -39,11 +38,9 @@ func runValkeyWorker(ctx context.Context, app *application, consumerName string,
 		pelCmd := vClient.B().Xreadgroup().Group(queue.ConsumerGroup, consumerName).Count(10).Streams().Key(queue.StreamTranscode).Id("0").Build()
 		pelMap, err := vClient.Do(ctx, pelCmd).AsXRead()
 		if err != nil {
-			// Any error (including nil response) means PEL is empty or doesn't exist yet
 			break
 		}
 
-		// Check if we actually got messages
 		hasMessages := false
 		for _, msgs := range pelMap {
 			if len(msgs) == 0 {
@@ -66,9 +63,6 @@ func runValkeyWorker(ctx context.Context, app *application, consumerName string,
 	}
 	app.logger.Info("PEL drained, listening for new messages", "consumer", consumerName)
 
-	// Phase 2: Listen for New Tasks
-	// We now blockingly listen using ID ">", meaning Valkey will only yield brand-new
-	// messages that have never been delivered to any other worker in our consumer group.
 	for {
 		select {
 		case <-ctx.Done():
@@ -89,20 +83,15 @@ func runValkeyWorker(ctx context.Context, app *application, consumerName string,
 				for _, msgData := range msgs {
 					payloadBytes := []byte(msgData.FieldValues["payload"])
 
-					// Process the task
 					err := app.HandleTranscodeTask(ctx, payloadBytes)
 					if err != nil {
 						app.logger.Error("transcode task failed", "msgId", msgData.ID, "err", err)
-						// Transcoding failed. We deliberately do NOT acknowledge the message here. 
-						// The janitor process will sweep it up later to retry or route to the DLQ.
 						continue
 					}
 
-					// Acknowledge the message upon success
 					ackCmd := vClient.B().Xack().Key(queue.StreamTranscode).Group(queue.ConsumerGroup).Id(msgData.ID).Build()
 					vClient.Do(ctx, ackCmd)
 
-					// Clean up retries hash on success
 					hdelCmd := vClient.B().Hdel().Key(queue.HashTranscodeRetries).Field(msgData.ID).Build()
 					vClient.Do(ctx, hdelCmd)
 				}
@@ -111,12 +100,12 @@ func runValkeyWorker(ctx context.Context, app *application, consumerName string,
 	}
 }
 
+// runValkeyJanitor claims stale pending messages and handles poisoned tasks.
 func runValkeyJanitor(ctx context.Context, app *application, wg *sync.WaitGroup) {
 	defer wg.Done()
 	vClient := app.queueMgr.ValkeyClient
 	app.logger.Info("started valkey janitor")
 
-	// Run the sweep check periodically to identify tasks that have stagnated.
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -126,8 +115,6 @@ func runValkeyJanitor(ctx context.Context, app *application, wg *sync.WaitGroup)
 			app.logger.Info("janitor shutting down")
 			return
 		case <-ticker.C:
-			// 1. Find messages pending for > 15 minutes
-			// XPENDING stream:transcode transcoder_group IDLE 900000 - + 100
 			cmd := vClient.B().Xpending().Key(queue.StreamTranscode).Group(queue.ConsumerGroup).Idle(900000).Start("-").End("+").Count(100).Build()
 			res, err := vClient.Do(ctx, cmd).ToArray()
 			if err != nil && err.Error() != "redis: nil" {
@@ -136,7 +123,6 @@ func runValkeyJanitor(ctx context.Context, app *application, wg *sync.WaitGroup)
 			}
 
 			for _, p := range res {
-				// Each pending message is an array where the first element is the message ID string
 				pArr, err := p.ToArray()
 				if err != nil || len(pArr) == 0 {
 					continue
@@ -147,24 +133,19 @@ func runValkeyJanitor(ctx context.Context, app *application, wg *sync.WaitGroup)
 					continue
 				}
 				
-				// 2. Track Retries
-				// We manage retries via a separate Redis Hash since streams don't track fail counts.
 				retryCmd := vClient.B().Hincrby().Key(queue.HashTranscodeRetries).Field(msgID).Increment(1).Build()
 				retries, _ := vClient.Do(ctx, retryCmd).AsInt64()
 				
 				if retries <= 3 {
 					app.logger.Info("janitor claiming message for retry", "id", msgID, "retries", retries)
-					// Claim ownership of the message from the dead/stuck consumer explicitly.
 					claimCmd := vClient.B().Xclaim().Key(queue.StreamTranscode).Group(queue.ConsumerGroup).Consumer("janitor").MinIdleTime("900000").Id(msgID).Build()
 					claimed, _ := vClient.Do(ctx, claimCmd).AsXRange()
 					
 					for _, msg := range claimed {
 						payloadBytes := []byte(msg.FieldValues["payload"])
 						
-						// Try to process immediately
 						err := app.HandleTranscodeTask(ctx, payloadBytes)
 						if err == nil {
-							// Successfully processed
 							vClient.Do(ctx, vClient.B().Xack().Key(queue.StreamTranscode).Group(queue.ConsumerGroup).Id(msgID).Build())
 							vClient.Do(ctx, vClient.B().Hdel().Key(queue.HashTranscodeRetries).Field(msgID).Build())
 						} else {
@@ -172,24 +153,18 @@ func runValkeyJanitor(ctx context.Context, app *application, wg *sync.WaitGroup)
 						}
 					}
 				} else {
-					// 3. Handle Poisoned Messages
-					// If the retry limit is breached, we route the task to our Dead Letter Queue (DLQ)
-					// to prevent an endless failing loop that could degrade worker throughput.
 					app.logger.Warn("janitor moving poisoned message to DLQ", "id", msgID)
 					
-					// Read the payload to move it
 					readIdCmd := vClient.B().Xrange().Key(queue.StreamTranscode).Start(msgID).End(msgID).Build()
 					messages, _ := vClient.Do(ctx, readIdCmd).AsXRange()
 					
 					if len(messages) > 0 {
 						payloadStr := messages[0].FieldValues["payload"]
 						
-						// XADD to DLQ
 						dlqCmd := vClient.B().Xadd().Key(queue.StreamTranscodeDLQ).Id("*").FieldValue().FieldValue("payload", payloadStr).Build()
 						vClient.Do(ctx, dlqCmd)
 					}
 					
-					// Acknowledge the message to permanently remove it from the primary stream's PEL.
 					vClient.Do(ctx, vClient.B().Xack().Key(queue.StreamTranscode).Group(queue.ConsumerGroup).Id(msgID).Build())
 					vClient.Do(ctx, vClient.B().Hdel().Key(queue.HashTranscodeRetries).Field(msgID).Build())
 				}
