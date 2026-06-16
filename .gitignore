@@ -65,3 +65,14 @@ web/dist/
 
 # Air (hot-reload)
 tmp/
+
+.envrc
+.env
+.infisical.json
+
+# Node modules (global ignore)
+node_modules/
+
+# Agent/Tooling files
+.agents/
+skills-lock.json
