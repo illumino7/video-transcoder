@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,7 @@ type StatusMessage struct {
 func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request) {
 	videoID := r.URL.Query().Get("id")
 	if videoID == "" {
-		app.logger.Error("missing video id")
+		app.logger.Error("missing video id parameter in SSE status request")
 		app.badRequestError(w, r, errors.New("missing video id for SSE"))
 		return
 	}
@@ -44,7 +45,11 @@ func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request)
 
 	// Query DB after subscribing to catch fast transcodes.
 	video, err := app.store.Videos.Get(ctx, videoID)
-	if err == nil {
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			app.logger.Error("failed to retrieve video state for SSE client", "video_id", videoID, "err", err)
+		}
+	} else {
 		if video.Status == "COMPLETED" || video.Status == "FAILED" {
 			msg := StatusMessage{
 				UUID:      videoID,
@@ -67,7 +72,7 @@ func (app *application) ssestatusHandler(w http.ResponseWriter, r *http.Request)
 		case <-ctx.Done():
 			return
 		case err := <-errCh:
-			app.logger.Error("sse stream error", "err", err)
+			app.logger.Error("Valkey subscription failed in SSE connection", "video_id", videoID, "err", err)
 			return
 		case msg := <-msgCh:
 			fmt.Fprintf(w, "data: %s\n\n", msg)

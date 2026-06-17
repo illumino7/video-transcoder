@@ -28,6 +28,7 @@ func (app *application) presignUpload(w http.ResponseWriter, r *http.Request) {
 
 	presignedURL, err := app.s3.PresignedPutURL(r.Context(), UploadsBucket, objectKey, 15*time.Minute, contentType)
 	if err != nil {
+		app.logger.Error("failed to generate presigned upload URL", "video_id", id, "s3_key", objectKey, "err", err)
 		app.internalServerError(w, r, err)
 		return
 	}
@@ -57,6 +58,7 @@ func (app *application) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	info, err := app.s3.StatObject(r.Context(), UploadsBucket, body.S3Key)
 	if err != nil {
+		app.logger.Warn("failed to verify upload file existence in storage", "s3_key", body.S3Key, "err", err)
 		app.badRequestError(w, r, fmt.Errorf("file not found in storage: %w", err))
 		return
 	}

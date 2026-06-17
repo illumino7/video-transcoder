@@ -80,13 +80,13 @@ func runOutboxRelay(ctx context.Context, dbPool *sql.DB, store *db.Storage, clie
 		}
 
 		if !isLeader {
-			logger.Info("standby mode - lock held by another process")
+			logger.Info("standby mode - advisory lock held by another instance", "lock_id", outboxLockID)
 			conn.Close()
 			time.Sleep(lockRetryInterval)
 			continue
 		}
 
-		logger.Info("acquired advisory lock - active leader status")
+		logger.Info("acquired advisory lock - promoted to active leader", "lock_id", outboxLockID)
 
 		err = processEventsLoop(ctx, conn, store, client, logger)
 		if err != nil {
@@ -163,7 +163,7 @@ func processEventsLoop(ctx context.Context, conn *sql.Conn, store *db.Storage, c
 					break
 				}
 
-				logger.Error("valkey publish failed, backing off", "err", err, "backoff", backoff)
+				logger.Error("valkey publish failed, retrying with backoff", "event_id", event.ID, "backoff_ms", backoff.Milliseconds(), "err", err)
 				time.Sleep(backoff)
 				backoff = backoff * 2
 				if backoff > maxBackoff {
