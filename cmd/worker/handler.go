@@ -77,8 +77,6 @@ func (app *application) HandleTranscodeTask(ctx context.Context, payloadBytes []
 	app.logger.Info("downloading raw video from S3", "s3Key", s3Key, "dest", localInput)
 	if err := app.s3.Download(ctx, UploadsBucket, s3Key, localInput); err != nil {
 		app.logger.Error("failed to download raw video from S3", "video_id", payload.VideoID, "s3_key", s3Key, "err", err)
-		_ = app.store.Videos.UpdateStatus(ctx, payload.VideoID, "FAILED")
-		app.broadcastStatus(ctx, payload.VideoID, "FAILED")
 		return fmt.Errorf("s3 download: %w", err)
 	}
 	defer func() {
@@ -184,8 +182,6 @@ func (app *application) HandleTranscodeTask(ctx context.Context, payloadBytes []
 
 	if len(transcodeErrors) > 0 {
 		app.logger.Error("transcoding pipeline failed", "video_id", payload.VideoID, "errors", transcodeErrors)
-		_ = app.store.Videos.UpdateStatus(ctx, payload.VideoID, "FAILED")
-		app.broadcastStatus(ctx, payload.VideoID, "FAILED")
 		return fmt.Errorf("transcode pipeline failure: %v", transcodeErrors)
 	}
 
@@ -250,8 +246,6 @@ func (app *application) HandleTranscodeTask(ctx context.Context, payloadBytes []
 	masterFile, err := os.Create(masterPath)
 	if err != nil {
 		app.logger.Error("failed to create master playlist file", "video_id", payload.VideoID, "path", masterPath, "err", err)
-		_ = app.store.Videos.UpdateStatus(ctx, payload.VideoID, "FAILED")
-		app.broadcastStatus(ctx, payload.VideoID, "FAILED")
 		return fmt.Errorf("create master playlist file: %w", err)
 	}
 
@@ -259,16 +253,12 @@ func (app *application) HandleTranscodeTask(ctx context.Context, payloadBytes []
 	masterFile.Close()
 	if err != nil {
 		app.logger.Error("failed to write master playlist contents", "video_id", payload.VideoID, "path", masterPath, "err", err)
-		_ = app.store.Videos.UpdateStatus(ctx, payload.VideoID, "FAILED")
-		app.broadcastStatus(ctx, payload.VideoID, "FAILED")
 		return fmt.Errorf("write master playlist file: %w", err)
 	}
 
 	s3Prefix := payload.VideoID
 	if err := app.s3.UploadDir(ctx, StreamingBucket, s3Prefix, outputDir); err != nil {
 		app.logger.Error("failed to upload HLS output to S3", "err", err)
-		_ = app.store.Videos.UpdateStatus(ctx, payload.VideoID, "FAILED")
-		app.broadcastStatus(ctx, payload.VideoID, "FAILED")
 		return fmt.Errorf("s3 upload HLS: %w", err)
 	}
 	app.logger.Info("uploaded HLS output to streaming bucket", "prefix", s3Prefix)

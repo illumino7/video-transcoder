@@ -55,6 +55,7 @@ bin/
 # Temp working dirs (worker creates these during transcode)
 uploads/
 outputs/
+SYSTEM_ARCHITECTURE.md
 
 # Reference
 reference/

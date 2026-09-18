@@ -5,6 +5,7 @@ import "github.com/valkey-io/valkey-go"
 const (
 	StreamTranscode      = "stream:transcode"
 	StreamTranscodeDLQ   = "stream:transcode:dlq"
+	ZSetTranscodeDelayed = "zset:transcode:delayed"
 	ConsumerGroup        = "transcoder_group"
 	HashTranscodeRetries = "hash:transcode:retries"
 )
